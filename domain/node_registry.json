@@ -17,8 +17,12 @@
     "Code Block 內呼叫 List.* 必須寫成 DSCore.List.*，否則『找到 List 的多個定義』而輸出 null。",
     "Code Block 每一行 statement 一個輸出埠；輸入埠依變數第一次出現的順序。",
     "Code Block 中對 var[]..[] 參數逐項運算用複製導引 <1>（例：DSCore.List.Count(g<1>)）；@L2 在 Dynamo 2.6 無效。",
-    "Python Script 程式碼避免反斜線跳脫（\\n 等），曾導致 EOL while scanning string；換行用 unichr(10)，路徑用正斜線。",
-    "Dynamo 2.6 (Revit 2021) Python 為 IronPython2。",
+    "【僅 Dynamo 2.6/IronPython2】Python Script 程式碼避免反斜線跳脫（\\n 等），曾導致 EOL while scanning string；換行用 unichr(10)，路徑用正斜線。Dynamo 3.6 (Revit 2026) 實測：pythonCode 以 JSON 換行送入正常，unichr 在 Python 3 不存在、勿用。",
+    "【版本對照】Revit 2021=Dynamo 2.6=IronPython2；Revit 2024=Dynamo 2.19；Revit 2026=Dynamo 3.6=CPython3（本機只附 DSCPython，無 IronPython）。寫 Python 前先確認版本：3.x 用 Python 3 語法（print()、str 即 unicode、無 unichr/xrange），本表 verified 標 Dynamo 2.6 的節點在 3.6 未必同名同埠。",
+    "【單位】Dynamo for Revit 的幾何與數值依 Revit 專案顯示單位（mm 專案寫 6000 = 6 m）；Python 內直接呼叫 Revit API 則是內部單位英尺，需 UnitUtils.ConvertToInternalUnits(v, UnitTypeId.Millimeters) 轉換。送數值前先確認專案單位。",
+    "【元件綁定 Element Binding】Revit 建立節點（Wall.ByCurveAndHeight 等）重跑會更新同一批元件而非另建：改數量 0..4→0..2 會刪掉多出的牆；自動執行模式下改 Code Block 即時同步。綁定隨 .dyn 儲存；要保留現有元件另建一批，請建新節點（新 GUID）。刪除節點不會刪除已建元件。",
+    "【複製導引 Replication】Code Block 預設 lacing=最短；兩清單要交叉組合用 <1><2>（例：Point.ByCoordinates(xs<1>, ys<2>, 0) 產生網格），等長逐項配對不必加。單一值與清單運算會自動對清單逐項套用。",
+    "【包裝/解包】Python 輸入的 Revit 元件是 Dynamo 包裝物件，用 UnwrapElement(IN[0]) 取 Revit API 元件；輸出 Revit 元件要 clr.AddReference('RevitNodes'); import Revit; clr.ImportExtensions(Revit.Elements) 後 .ToDSType(True)（取既有元件，Revit 擁有）或 .ToDSType(False)（Python 內新建，交由 Dynamo 綁定）。幾何轉換需 clr.ImportExtensions(Revit.GeometryConversion)：Revit→Dynamo 用 .ToProtoType()，Dynamo→Revit 用 .ToXyz()/.ToRevitType()。寫入用 TransactionManager.Instance.EnsureInTransaction(doc) … TransactionTaskDone()，不要自己 new Transaction。（Revit 2026/Dynamo 3.6 實測 ToDSType(True) 可用）",
     "禁止在 Python 節點內透過 DynamoRevit/Dispatcher 刪除節點或修改工作區，會導致 Dynamo 當掉。",
     "無法透過 MCP 讀取節點輸出值；需要驗證時請使用者執行並回報，或檢查匯出的檔案。"
   ],
@@ -147,7 +151,7 @@
     "Revit.Elements.Room.FinishBoundary": {"create": "Revit.Elements.Room.FinishBoundary", "inputs": ["room"], "outputs": ["Curve[][]"], "creationName": "Revit.Elements.Room.FinishBoundary", "nodeName": "Room.FinishBoundary", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
     "Revit.Elements.Room.Height": {"create": "Revit.Elements.Room.Height", "inputs": ["room"], "outputs": ["double"], "creationName": "Revit.Elements.Room.Height", "nodeName": "Room.Height", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
     "DSCore.Math.Round@double": {"create": "DSCore.Math.Round@double", "inputs": ["number"], "outputs": ["number"], "creationName": "DSCore.Math.Round@double", "nodeName": "Math.Round", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
-    "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType": {"create": "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType", "inputs": ["curve", "height", "level", "wallType"], "outputs": ["Wall"], "creationName": "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType", "nodeName": "Wall.ByCurveAndHeight", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
+    "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType": {"create": "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType", "inputs": ["curve", "height", "level", "wallType"], "outputs": ["Wall"], "creationName": "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType", "nodeName": "Wall.ByCurveAndHeight", "status": "auto-verified", "verified": "Dynamo 3.6 / Revit 2026 (2026-10-21)"},
     "Autodesk.DesignScript.Geometry.PolyCurve.Curves": {"create": "Autodesk.DesignScript.Geometry.PolyCurve.Curves", "inputs": ["polyCurve"], "outputs": ["Curve[]"], "creationName": "Autodesk.DesignScript.Geometry.PolyCurve.Curves", "nodeName": "PolyCurve.Curves", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
     "Revit.Elements.WallType.ByName@string": {"create": "Revit.Elements.WallType.ByName@string", "inputs": ["name"], "outputs": ["WallType"], "creationName": "Revit.Elements.WallType.ByName@string", "nodeName": "WallType.ByName", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
     "Autodesk.DesignScript.Geometry.PolyCurve.ByJoinedCurves@Autodesk.DesignScript.Geometry.Curve[],double,bool,double": {"create": "Autodesk.DesignScript.Geometry.PolyCurve.ByJoinedCurves@Autodesk.DesignScript.Geometry.Curve[],double,bool,double", "inputs": ["curves", "joinTolerance"], "outputs": ["PolyCurve"], "creationName": "Autodesk.DesignScript.Geometry.PolyCurve.ByJoinedCurves@Autodesk.DesignScript.Geometry.Curve[],double", "nodeName": "PolyCurve.ByJoinedCurves", "status": "auto-verified", "verified": "Dynamo 2.6 / Revit 2021 (2026-10-14)"},
@@ -6633,6 +6637,82 @@
         }
       ],
       "status": "captured"
+    },
+    "陣列平行牆（Python 取最低樓層＋基本牆類型）": {
+      "description": "Python 節點自動取最低樓層與第一個基本牆類型（ToDSType），Code Block 依 i=0..N 產生平行線段，接 Wall.ByCurveAndHeight 批次建牆。改 Code Block 的數量/長度/間距/高度即可。",
+      "keywords": [
+        "牆",
+        "建牆",
+        "平行牆",
+        "陣列",
+        "wall",
+        "Wall.ByCurveAndHeight",
+        "樓層",
+        "牆類型"
+      ],
+      "nodes": [
+        {
+          "ref": "python_script",
+          "name": "Python Script",
+          "inputCount": 0,
+          "pythonCode": "import clr\nclr.AddReference('RevitAPI')\nfrom Autodesk.Revit.DB import FilteredElementCollector, Level, WallType, WallKind\nclr.AddReference('RevitServices')\nfrom RevitServices.Persistence import DocumentManager\nclr.AddReference('RevitNodes')\nimport Revit\nclr.ImportExtensions(Revit.Elements)\ndoc = DocumentManager.Instance.CurrentDBDocument\nlevels = sorted(list(FilteredElementCollector(doc).OfClass(Level).ToElements()), key=lambda l: l.Elevation)\nwtypes = [t for t in FilteredElementCollector(doc).OfClass(WallType).ToElements() if t.Kind == WallKind.Basic]\nOUT = [levels[0].ToDSType(True), wtypes[0].ToDSType(True)]",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "ref": "code_block",
+          "name": "Code Block",
+          "value": "i = 0..4;\np1 = Point.ByCoordinates(0, i * 3000, 0);\np2 = Point.ByCoordinates(6000, i * 3000, 0);\nlines = Line.ByStartPointEndPoint(p1, p2);\nlv = data[0];\nwt = data[1];\nh = 3000;",
+          "x": 400,
+          "y": 0
+        },
+        {
+          "ref": "revit_elements_wall_bycurveandheight_autodesk_designscript_geometry_curve_double_revit_elements_level_revit_elements_walltype",
+          "name": "Revit.Elements.Wall.ByCurveAndHeight@Autodesk.DesignScript.Geometry.Curve,double,Revit.Elements.Level,Revit.Elements.WallType",
+          "x": 1000,
+          "y": 0
+        }
+      ],
+      "connectors": [
+        {
+          "from": "python_script",
+          "fromPort": 0,
+          "to": "code_block",
+          "toPort": 0
+        },
+        {
+          "from": "code_block",
+          "fromPort": 3,
+          "to": "revit_elements_wall_bycurveandheight_autodesk_designscript_geometry_curve_double_revit_elements_level_revit_elements_walltype",
+          "toPort": 0
+        },
+        {
+          "from": "code_block",
+          "fromPort": 6,
+          "to": "revit_elements_wall_bycurveandheight_autodesk_designscript_geometry_curve_double_revit_elements_level_revit_elements_walltype",
+          "toPort": 1
+        },
+        {
+          "from": "code_block",
+          "fromPort": 4,
+          "to": "revit_elements_wall_bycurveandheight_autodesk_designscript_geometry_curve_double_revit_elements_level_revit_elements_walltype",
+          "toPort": 2
+        },
+        {
+          "from": "code_block",
+          "fromPort": 5,
+          "to": "revit_elements_wall_bycurveandheight_autodesk_designscript_geometry_curve_double_revit_elements_level_revit_elements_walltype",
+          "toPort": 3
+        }
+      ],
+      "gotchas": [
+        "數值單位依專案單位（本例假設 mm）",
+        "專案無任何基本牆類型時 Python 節點報 index 錯誤",
+        "Dynamo 3.x / Revit 2026 CPython3 實測：clr.ImportExtensions(Revit.Elements) + ToDSType(True) 可用",
+        "Python 節點 inputCount=0，否則未接的 IN 會讓節點不執行"
+      ],
+      "status": "verified",
+      "verified": "Dynamo 3.6 / Revit 2026 (2026-10-21)"
     }
   }
 }
