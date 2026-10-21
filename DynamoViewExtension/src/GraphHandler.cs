@@ -340,6 +340,11 @@ namespace DynamoMCPListener
                     return JsonConvert.SerializeObject(new { status = "ok", node = nodeDetail });
                 }
 
+                if (action == "get_node_values")
+                {
+                    return GetNodeValues(data);
+                }
+
                 if (action == "list_nodes") {
                     string filter = data["filter"]?.ToString()?.ToLower() ?? "";
                     MCPLogger.Info($"[list_nodes] Searching for: {filter}");
@@ -554,6 +559,247 @@ namespace DynamoMCPListener
                 action,
                 message = "目前尚未開啟可分析的 Dynamo 工作區。"
             });
+        }
+
+        private const int NodeValueMaxDepth = 3;
+        private const int NodeValueMaxString = 300;
+        private const int NodeValueNestedMaxItems = 10;
+        private const int NodeValueCountCap = 10000;
+        private const int NodeValueLeafBudget = 1500;
+
+        private string GetNodeValues(JObject data)
+        {
+            var workspace = GetWorkspace();
+            if (workspace == null)
+            {
+                return WorkspaceUnavailableError("get_node_values");
+            }
+
+            int maxItems = 20;
+            if (data["maxItems"] != null && int.TryParse(data["maxItems"].ToString(), out int requested))
+            {
+                maxItems = Math.Max(1, Math.Min(200, requested));
+            }
+
+            IEnumerable<NodeModel> targets = workspace.Nodes;
+            var notFound = new List<string>();
+            if (data["nodeIds"] != null && data["nodeIds"].Type != JTokenType.Null && !(data["nodeIds"] is JArray))
+            {
+                return "{\"status\": \"error\", \"message\": \"nodeIds must be an array\"}";
+            }
+            var ids = data["nodeIds"] as JArray;
+            if (ids != null && ids.Count > 0)
+            {
+                var picked = new List<NodeModel>();
+                foreach (var idToken in ids)
+                {
+                    string id = idToken?.ToString();
+                    Guid guid;
+                    if (!Guid.TryParse(id, out guid) && !_nodeIdMap.TryGetValue(id ?? "", out guid))
+                    {
+                        notFound.Add(id);
+                        continue;
+                    }
+                    var node = workspace.Nodes.FirstOrDefault(n => n.GUID == guid);
+                    if (node == null) notFound.Add(id);
+                    else if (!picked.Contains(node)) picked.Add(node);
+                }
+                targets = picked;
+            }
+
+            var engine = _dynamoModel?.EngineController;
+            var budget = new ValueBudget();
+            var nodes = targets.Select(n =>
+            {
+                string stateStr = "Unknown";
+                try { stateStr = n.State.ToString(); } catch { }
+
+                var outputs = new List<object>();
+                for (int i = 0; i < n.OutPorts.Count; i++)
+                {
+                    object value;
+                    try
+                    {
+                        value = engine == null ? null : SerializeMirror(n.GetValue(i, engine), 0, maxItems, budget);
+                    }
+                    catch (Exception ex)
+                    {
+                        value = new { error = ex.Message };
+                    }
+                    outputs.Add(new { index = i, name = n.OutPorts[i].Name, value });
+                }
+
+                return new
+                {
+                    id = n.GUID.ToString(),
+                    name = n.Name,
+                    state = stateStr,
+                    isFrozen = GetBoolProperty(n, "IsFrozen"),
+                    messages = GetNodeMessages(n),
+                    outputs
+                };
+            }).ToList();
+
+            string runType = null;
+            try { runType = (workspace as HomeWorkspaceModel)?.RunSettings?.RunType.ToString(); } catch { }
+
+            bool? evaluating = null;
+            try { evaluating = _dynamoModel?.Scheduler?.HasPendingTasks; } catch { }
+
+            return JsonConvert.SerializeObject(new
+            {
+                status = "ok",
+                runType,
+                evaluating,
+                engineAvailable = engine != null,
+                nodeCount = nodes.Count,
+                budgetExhausted = budget.Remaining <= 0,
+                notFound,
+                nodes
+            });
+        }
+
+        // 整次呼叫共用的葉節點額度：Python 端 WebSocket 單則訊息上限 1 MiB，超過會斷線
+        private sealed class ValueBudget
+        {
+            public int Remaining = NodeValueLeafBudget;
+        }
+
+        private static object SerializeMirror(ProtoCore.Mirror.MirrorData mirror, int depth, int maxItems, ValueBudget budget)
+        {
+            if (mirror == null || mirror.IsNull) return null;
+
+            if (mirror.IsCollection)
+            {
+                if (depth >= NodeValueMaxDepth || budget.Remaining <= 0)
+                {
+                    return new { count = (int?)null, truncated = true, items = (List<object>)null };
+                }
+
+                int limit = depth == 0 ? maxItems : Math.Min(maxItems, NodeValueNestedMaxItems);
+                // 頂層才算總數（上限 NodeValueCountCap），避免大清單逐筆建 MirrorData 卡住 UI 執行緒
+                int? count = null;
+                if (depth == 0)
+                {
+                    count = mirror.GetElements().Take(NodeValueCountCap + 1).Count();
+                }
+                var head = mirror.GetElements().Take(limit + 1).ToList();
+                var items = new List<object>();
+                foreach (var e in head.Take(limit))
+                {
+                    if (budget.Remaining <= 0) break;
+                    items.Add(SerializeMirror(e, depth + 1, maxItems, budget));
+                }
+                return new
+                {
+                    count,
+                    countCapped = count > NodeValueCountCap,
+                    truncated = head.Count > items.Count,
+                    items
+                };
+            }
+
+            budget.Remaining--;
+
+            object raw = mirror.Data;
+            if (raw == null) return Truncate(mirror.StringData);
+            if (raw is string s) return Truncate(s);
+            if (raw is bool || raw is decimal || raw.GetType().IsPrimitive) return raw;
+
+            // Revit 元件帶 Id 方便用 revit-mcp 交叉驗證；非基本型別一律轉字串，避免序列化炸掉整包回應
+            object elementId = null;
+            try
+            {
+                var idValue = raw.GetType().GetProperty("Id", BindingFlags.Instance | BindingFlags.Public)?.GetValue(raw);
+                elementId = idValue == null || idValue is string || idValue.GetType().IsPrimitive ? idValue : idValue.ToString();
+            }
+            catch { }
+
+            string text;
+            try { text = raw.ToString(); } catch { text = mirror.StringData; }
+
+            return new { type = raw.GetType().Name, id = elementId, value = Truncate(text) };
+        }
+
+        private static object ReadMember(object target, string name)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var t = target.GetType();
+            var field = t.GetField(name, flags);
+            if (field != null) return field.GetValue(target);
+            return t.GetProperty(name, flags)?.GetValue(target);
+        }
+
+        private static string Truncate(string s)
+        {
+            if (s == null || s.Length <= NodeValueMaxString) return s;
+            return s.Substring(0, NodeValueMaxString) + "…";
+        }
+
+        // NodeModel.Infos 在參考組件中不是 public，只能反射；Info 的 State/Message 是欄位不是屬性
+        // Dynamo 3.6 實測：執行期警告不在 Infos，介面泡泡卻看得到，所以依序試三個來源：
+        // NodeModel.NodeInfos → NodeModel.Infos → NodeViewModel.ErrorBubble.NodeMessages
+        private List<object> GetNodeMessages(NodeModel node)
+        {
+            var result = new List<object>();
+            var seen = new HashSet<string>();
+            try
+            {
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                foreach (var propName in new[] { "NodeInfos", "Infos" })
+                {
+                    var infos = node.GetType().GetProperty(propName, flags)?.GetValue(node) as System.Collections.IEnumerable;
+                    if (infos == null) continue;
+                    foreach (var info in infos)
+                    {
+                        if (info == null) continue;
+                        AddMessage(result, seen, ReadMember(info, "State")?.ToString(), ReadMember(info, "Message")?.ToString());
+                    }
+                }
+
+                if (result.Count == 0)
+                {
+                    foreach (var packet in GetErrorBubbleMessages(node))
+                    {
+                        AddMessage(result, seen, ReadMember(packet, "Style")?.ToString(), ReadMember(packet, "Message")?.ToString());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MCPLogger.Info($"[get_node_values] read messages failed for {node.GUID}: {ex.Message}");
+            }
+            return result;
+        }
+
+        private static void AddMessage(List<object> result, HashSet<string> seen, string level, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message) || !seen.Add(level + "|" + message)) return;
+            result.Add(new { level, message = Truncate(message) });
+        }
+
+        private IEnumerable<object> GetErrorBubbleMessages(NodeModel node)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var spaceVm = _vm?.GetType().GetProperty("CurrentSpaceViewModel", flags)?.GetValue(_vm);
+            var nodeVms = spaceVm?.GetType().GetProperty("Nodes", flags)?.GetValue(spaceVm) as System.Collections.IEnumerable;
+            if (nodeVms == null) yield break;
+
+            foreach (var nodeVm in nodeVms)
+            {
+                if (nodeVm == null) continue;
+                var model = nodeVm.GetType().GetProperty("NodeModel", flags)?.GetValue(nodeVm) as NodeModel;
+                if (model == null || model.GUID != node.GUID) continue;
+
+                var bubble = nodeVm.GetType().GetProperty("ErrorBubble", flags)?.GetValue(nodeVm);
+                var packets = bubble?.GetType().GetProperty("NodeMessages", flags)?.GetValue(bubble) as System.Collections.IEnumerable;
+                if (packets == null) yield break;
+                foreach (var p in packets)
+                {
+                    if (p != null) yield return p;
+                }
+                yield break;
+            }
         }
 
         private void CreateNode(JToken n)

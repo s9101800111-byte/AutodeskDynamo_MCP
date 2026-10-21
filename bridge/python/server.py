@@ -1401,6 +1401,26 @@ class MCPBridgeServer:
                 "readOnlyHint": True
             },
             {
+                "name": "get_node_values",
+                "description": "讀取節點最近一次執行的輸出值與警告/錯誤訊息（每個輸出埠的值、清單筆數、Revit 元件 Id、Infos 訊息），用來在建圖後自我驗收。不會觸發執行：runType 為 Manual 時值可能是舊的，請使用者按 Run 後再讀。只看結構（節點、連線）請改用 get_graph_status。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "nodeIds": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要讀的節點 GUID；省略則讀全部節點"
+                        },
+                        "maxItems": {
+                            "type": "integer",
+                            "description": "每層清單最多回傳幾筆（1–200，預設 20），超過會標 truncated 並附總數 count"
+                        },
+                        "sessionId": {"type": "string", "description": "選用。指定會話 ID，未指定用最新連線"}
+                    }
+                },
+                "readOnlyHint": True
+            },
+            {
                 "name": "clear_workspace",
                 "description": "清除工作區內容。",
                 "inputSchema": {"type": "object", "properties": {}},
@@ -1755,6 +1775,8 @@ class MCPBridgeServer:
             elif name == "get_graph_status":
                 _, res = await _check_dynamo_connection()
                 return res
+            elif name == "get_node_values":
+                return await get_node_values(**args)
             elif name == "clear_workspace":
                 return await clear_workspace()
             elif name == "get_mcp_guidelines":
@@ -1807,6 +1829,33 @@ async def _check_dynamo_connection(session_id: str = None) -> tuple[bool, str]:
         return True, json.dumps(data, ensure_ascii=False)
     except Exception as e: 
         return False, str(e)
+
+async def get_node_values(nodeIds: list = None, maxItems: int = 20, sessionId: str = None) -> str:
+    """讀取節點輸出值與警告（C# action: get_node_values）"""
+    with ws_manager._lock:
+        sessions = list(ws_manager.active_sessions.keys())
+    if not sessions:
+        return "No active Dynamo connections."
+    if sessionId and sessionId not in sessions:
+        return f"Specified session {sessionId} not found."
+
+    if nodeIds is not None and not isinstance(nodeIds, list):
+        return "[FAIL] nodeIds 必須是陣列（GUID 字串清單）。"
+
+    target_id = sessionId if sessionId else sessions[-1]
+    payload = {"action": "get_node_values", "maxItems": maxItems}
+    if nodeIds:
+        payload["nodeIds"] = nodeIds
+    try:
+        data = await ws_manager.send_command_async(target_id, payload)
+    except Exception as e:
+        return f"[FAIL] get_node_values: {e}"
+    if isinstance(data, dict) and data.get("status") == "error":
+        return f"[FAIL] {data.get('message')}"
+    # 舊版外掛不認得此 action，會落到建節點流程回 {"status": "ok"}（沒有 nodes）
+    if not isinstance(data, dict) or "nodes" not in data:
+        return "[FAIL] Dynamo 外掛不支援 get_node_values（舊版 MCP Listener），請關閉 Revit 後重新部署外掛。"
+    return json.dumps(data, ensure_ascii=False)
 
 async def read_dynamo_resource(resourceType: str, nodeId: str = None, sessionId: str = None) -> dict:
     """

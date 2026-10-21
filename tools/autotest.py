@@ -82,10 +82,45 @@ async def test_python_connection():
     # Expect 3 nodes, 2 connectors
     if node_count >= 3 and conn_count >= 2:
         print(f"✅ {duration:.2f}s - Created {node_count} nodes, {conn_count} connectors.")
-        return True
+        # n3 = 本次建立的 Watch（外掛會把字串 id 對應到新 GUID），避免讀到舊圖殘留的 Watch
+        return await check_watch_value("n3", 42)
     else:
         print(f"❌ {duration:.2f}s - Failed. Got {node_count} nodes, {conn_count} connectors.")
         return False
+
+def _same_number(value, expected):
+    try:
+        return float(value) == float(expected)
+    except (TypeError, ValueError):
+        return False
+
+async def check_watch_value(node_id, expected, timeout=10.0):
+    """用 get_node_values 確認 Watch 節點真的算出 expected（手動執行模式只提醒不判失敗）"""
+    deadline = time.time() + timeout
+    watch_values = []
+    values = {}
+    while time.time() < deadline:
+        await asyncio.sleep(1.0)  # Revit 首次啟動 Python 引擎可能要好幾秒
+        raw = await call_mcp_tool("get_node_values", {"nodeIds": [node_id]})
+        try:
+            values = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            print(f"❌ get_node_values 回傳無法解析: {raw}")
+            return False
+        if not isinstance(values, dict) or "nodes" not in values:
+            print(f"❌ get_node_values 失敗: {raw}")
+            return False
+        if values.get("runType") != "Automatic":
+            print(f"⚠️ 執行模式為 {values.get('runType')}，Watch 尚未執行，略過讀值檢查")
+            return True
+
+        watch_values = [o.get("value") for n in values["nodes"] for o in n.get("outputs", [])]
+        if any(_same_number(v, expected) for v in watch_values):
+            print(f"✅ Watch 讀到 {expected}（get_node_values）")
+            return True
+
+    print(f"❌ Watch 值不符，預期 {expected}，{timeout:.0f} 秒內實得 {watch_values}")
+    return False
 
 async def test_clockwork():
     print("[3/5] Testing Plugin Support (Clockwork)...")
